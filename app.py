@@ -107,31 +107,53 @@ sma_window = st.sidebar.slider("Moving Average Window (Days)", min_value=10, max
 def load_data(symbols, start, end, is_max):
     # auto_adjust=True bakes dividends and splits into the 'Close' price
     # to accurately reflect Total Return.
-    if is_max:
-        df = yf.download(symbols, period="max", auto_adjust=True, progress=False)
-    else:
-        df = yf.download(symbols, start=start, end=end, auto_adjust=True, progress=False)
+    for attempt in range(3):
+        try:
+            if is_max:
+                df = yf.download(symbols, period="max", auto_adjust=True, progress=False, threads=False)
+            else:
+                end_dt = end + datetime.timedelta(days=1)
+                df = yf.download(
+                    symbols,
+                    start=start.strftime("%Y-%m-%d"),
+                    end=end_dt.strftime("%Y-%m-%d"),
+                    auto_adjust=True,
+                    progress=False,
+                    threads=False,
+                )
 
-    # yfinance returns MultiIndex columns for multiple tickers.
-    # We just want the 'Close' prices (which are now adjusted for dividends).
-    if isinstance(df.columns, pd.MultiIndex):
-        return df["Close"]
-    else:
-        # Fallback if only one ticker manages to download
-        return df[["Close"]]
+            if df is None or df.empty:
+                continue
+
+            # yfinance returns MultiIndex columns for multiple tickers.
+            # We just want the 'Close' prices (which are now adjusted for dividends).
+            if isinstance(df.columns, pd.MultiIndex):
+                return df["Close"]
+            else:
+                # Fallback if only one ticker manages to download
+                if "Close" in df.columns:
+                    return df[["Close"]]
+                return df
+        except Exception:
+            continue
+
+    raise ValueError(f"No market data returned for {symbols} from Yahoo Finance.")
 
 
 @st.cache_data(ttl=3600)
 def fetch_pair_data(t_a, t_b, start, end, use_max):
-    data = load_data([t_a, t_b], start, end, use_max)
+    s_a = load_data(t_a, start, end, use_max)
+    s_b = load_data(t_b, start, end, use_max)
 
-    if isinstance(data.columns, pd.MultiIndex):
-        data = data.xs("Close", level=0, axis=1)
+    if isinstance(s_a.index, pd.DatetimeIndex) and s_a.index.tz is not None:
+        s_a.index = s_a.index.tz_localize(None)
+    if isinstance(s_b.index, pd.DatetimeIndex) and s_b.index.tz is not None:
+        s_b.index = s_b.index.tz_localize(None)
 
-    if t_a not in data.columns or t_b not in data.columns:
-        raise ValueError(f"'{t_a}' and '{t_b}' were not both returned in the fetched close-price data.")
+    s_a = s_a.rename(t_a)
+    s_b = s_b.rename(t_b)
 
-    aligned = data[[t_a, t_b]].dropna()
+    aligned = pd.concat([s_a, s_b], axis=1, join="inner").dropna()
     if aligned.empty:
         raise ValueError(f"'{t_a}' and '{t_b}' do not have overlapping historical trading days.")
 
