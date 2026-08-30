@@ -1,5 +1,4 @@
 import datetime
-
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -67,33 +66,35 @@ ticker_a = st.sidebar.text_input(
     "Asset A (Numerator)",
     value=st.session_state.ticker_a,
     help="Yahoo Finance ticker symbol (e.g., GC=F, SPY, BTC-USD)",
-).upper()
+).strip().upper()
 
 ticker_b = st.sidebar.text_input(
     "Asset B (Denominator)",
     value=st.session_state.ticker_b,
     help="Yahoo Finance ticker symbol (e.g., SI=F, GLD, ETH-USD)",
-).upper()
+).strip().upper()
 
 # Sync inputs back to session state
 st.session_state.ticker_a = ticker_a
 st.session_state.ticker_b = ticker_b
 
 # Date range selection
-use_max_history = st.sidebar.checkbox("Use maximum available history", value=True, help="Compare both assets across their shared historical overlap instead of a fixed date range.")
+use_max_history = st.sidebar.checkbox(
+    "Use maximum available history",
+    value=True,
+    help="Compare both assets across their shared historical overlap instead of a fixed date range.",
+)
 
 default_start = datetime.date.today() - datetime.timedelta(days=5 * 365)
 start_date = st.sidebar.date_input(
     "Start Date",
     value=default_start,
     disabled=use_max_history,
-    help="Only used when maximum history is disabled.",
 )
 end_date = st.sidebar.date_input(
     "End Date",
     value=datetime.date.today(),
     disabled=use_max_history,
-    help="Only used when maximum history is disabled.",
 )
 
 # Moving Average parameter
@@ -101,137 +102,102 @@ sma_window = st.sidebar.slider("Moving Average Window (Days)", min_value=10, max
 
 
 # ---------------------------------------------------------
-# Data Fetching & Processing
+# Data Fetching & Normalization
 # ---------------------------------------------------------
-def normalize_close_frame(frame):
-    if frame is None or frame.empty:
-        return frame
-
-    if isinstance(frame.columns, pd.MultiIndex):
-        if "Close" in frame.columns.get_level_values(0):
-            df = frame.xs("Close", level=0, axis=1)
-            df.columns = [str(col) for col in df.columns]
-            return df
-
-    return frame
-
-
-def normalize_symbol_series(raw, ticker):
-    if raw is None or raw.empty:
-        return pd.Series(dtype=float)
-
-    df = normalize_close_frame(raw)
-
-    if isinstance(df, pd.Series):
-        series = df.copy()
-        series.name = ticker
-        return series
-
-    if ticker in df.columns:
-        series = df[ticker].copy()
-        series.name = ticker
-        return series
-
-    if len(df.columns) == 1:
-        series = df.iloc[:, 0].copy()
-        series.name = ticker
-        return series
-
-    normalized = df.rename(columns={list(df.columns)[0]: ticker})
-    series = normalized.iloc[:, 0].copy()
-    series.name = ticker
+def get_ticker_series(ticker_symbol: str, start=None, end=None, use_max=True) -> pd.Series:
+    ticker_obj = yf.Ticker(ticker_symbol)
+    
+    if use_max:
+        hist = ticker_obj.history(period="max", auto_adjust=False)
+    else:
+        # End date in history is exclusive, so add 1 day
+        end_dt = end + datetime.timedelta(days=1)
+        hist = ticker_obj.history(start=start.strftime("%Y-%m-%d"), end=end_dt.strftime("%Y-%m-%d"), auto_adjust=False)
+        
+    if hist.empty or "Close" not in hist.columns:
+        raise ValueError(f"No price history found for symbol '{ticker_symbol}'.")
+    
+    series = hist["Close"].copy()
+    # Strip timezone to avoid tz-aware vs tz-naive alignment drops
+    if series.index.tz is not None:
+        series.index = series.index.tz_localize(None)
+    series.name = ticker_symbol
     return series
 
 
 @st.cache_data(ttl=3600)
-def fetch_data(t_a, t_b, start=None, end=None, use_max_history=True):
-    if use_max_history:
-        left = yf.download(t_a, period="max", progress=False, auto_adjust=False)
-        right = yf.download(t_b, period="max", progress=False, auto_adjust=False)
-    else:
-        left = yf.download(t_a, start=start, end=end + datetime.timedelta(days=1), progress=False, auto_adjust=False)
-        right = yf.download(t_b, start=start, end=end + datetime.timedelta(days=1), progress=False, auto_adjust=False)
-
-    series_a = normalize_symbol_series(left, t_a)
-    series_b = normalize_symbol_series(right, t_b)
-
-    if series_a.empty or series_b.empty:
-        raise ValueError(f"No market data returned for {t_a} or {t_b} from Yahoo Finance.")
-
-    aligned = pd.concat([series_a, series_b], axis=1).dropna()
+def fetch_pair_data(t_a, t_b, start, end, use_max):
+    s_a = get_ticker_series(t_a, start, end, use_max)
+    s_b = get_ticker_series(t_b, start, end, use_max)
+    
+    # Inner join on common dates
+    aligned = pd.concat([s_a, s_b], axis=1, join="inner").dropna()
     if aligned.empty:
-        raise ValueError(f"{t_a} and {t_b} do not share a common market-data period.")
+        raise ValueError(f"'{t_a}' and '{t_b}' do not have overlapping historical trading days.")
+        
+    return aligned
 
-    return aligned[[t_a, t_b]]
 
-
+# ---------------------------------------------------------
+# Main Execution Flow
+# ---------------------------------------------------------
 if not ticker_a or not ticker_b:
     st.warning("Please enter valid ticker symbols for both assets.")
     st.stop()
 
 if ticker_a == ticker_b:
-    st.warning("Please select two different assets to compute a meaningful ratio.")
+    st.warning("Please select two different assets to compute a ratio.")
     st.stop()
 
 try:
-    with st.spinner("Fetching market data..."):
-        data = fetch_data(ticker_a, ticker_b, start_date, end_date, use_max_history)
-
-    if data.empty or ticker_a not in data.columns or ticker_b not in data.columns:
-        st.error("Unable to load data for the specified tickers or date range. Please verify ticker symbols.")
-        st.stop()
+    with st.spinner(f"Fetching data for {ticker_a} and {ticker_b}..."):
+        data = fetch_pair_data(ticker_a, ticker_b, start_date, end_date, use_max_history)
 
     st.caption(
-        f"Comparing {ticker_a} vs {ticker_b} over the shared period from {data.index.min().date()} to {data.index.max().date()}"
+        f"Displaying **{ticker_a} / {ticker_b}** across **{len(data)}** common trading days "
+        f"({data.index.min().strftime('%Y-%m-%d')} to {data.index.max().strftime('%Y-%m-%d')})."
     )
 
-    # Calculate metrics
+    # Ratio Calculations
     ratio = data[ticker_a] / data[ticker_b]
     sma = ratio.rolling(window=sma_window).mean()
-    mean_val = ratio.mean()
-    std_val = ratio.std()
-    current_val = ratio.iloc[-1]
-    prev_val = ratio.iloc[-2] if len(ratio) > 1 else current_val
-    delta = current_val - prev_val
-    delta_pct = (delta / prev_val) * 100
+    mean_val = float(ratio.mean())
+    std_val = float(ratio.std())
+    current_val = float(ratio.iloc[-1])
+    prev_val = float(ratio.iloc[-2]) if len(ratio) > 1 else current_val
+    delta_pct = ((current_val - prev_val) / prev_val) * 100
 
-    # ---------------------------------------------------------
     # Key Metric Cards
-    # ---------------------------------------------------------
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Current Ratio", f"{current_val:.3f}", f"{delta_pct:+.2f}%")
-    m2.metric("Period Average", f"{mean_val:.3f}")
-    m3.metric(f"{sma_window}-Day SMA", f"{sma.iloc[-1]:.3f}" if not sma.empty else "N/A")
-    m4.metric("Standard Deviation", f"{std_val:.3f}")
+    m2.metric("Historical Mean", f"{mean_val:.3f}")
+    m3.metric(f"{sma_window}-Day SMA", f"{sma.iloc[-1]:.3f}" if pd.notna(sma.iloc[-1]) else "N/A")
+    m4.metric("Standard Deviation (1σ)", f"{std_val:.3f}")
 
-    # ---------------------------------------------------------
-    # Plotly Interactive Chart
-    # ---------------------------------------------------------
+    # Plotly Chart
     fig = go.Figure()
 
-    # Ratio line
     fig.add_trace(
         go.Scatter(
             x=ratio.index,
             y=ratio,
             mode="lines",
-            name=f"{ticker_a} / {ticker_b}",
+            name=f"{ticker_a} / {ticker_b} Ratio",
             line=dict(color="#1f77b4", width=2),
         )
     )
 
-    # Moving average
     fig.add_trace(
         go.Scatter(
             x=sma.index,
             y=sma,
             mode="lines",
-            name=f"{sma_window}-Day SMA",
+            name=f"{sma_window}-Day Moving Avg",
             line=dict(color="#ff7f0e", width=1.5, dash="dash"),
         )
     )
 
-    # Mean line
+    # Reference Horizontal Lines
     fig.add_hline(
         y=mean_val,
         line_dash="dot",
@@ -239,8 +205,6 @@ try:
         annotation_text=f"Mean: {mean_val:.2f}",
         annotation_position="bottom right",
     )
-
-    # Upper and lower standard deviation bands (+/- 1 Std Dev)
     fig.add_hline(
         y=mean_val + std_val,
         line_dash="dot",
@@ -257,7 +221,7 @@ try:
     )
 
     fig.update_layout(
-        title=f"<b>Historical Ratio:</b> {ticker_a} vs. {ticker_b}",
+        title=f"<b>Price Ratio:</b> {ticker_a} vs. {ticker_b}",
         xaxis_title="Date",
         yaxis_title="Ratio",
         hovermode="x unified",
@@ -268,14 +232,12 @@ try:
 
     st.plotly_chart(fig, use_container_width=True)
 
-    # ---------------------------------------------------------
-    # Raw Data Table
-    # ---------------------------------------------------------
-    with st.expander("View Raw Data"):
+    # Data Inspection Table
+    with st.expander("View Raw Data Table"):
         table_df = data.copy()
         table_df["Ratio"] = ratio
         table_df[f"SMA_{sma_window}"] = sma
         st.dataframe(table_df.sort_index(ascending=False), use_container_width=True)
 
 except Exception as e:
-    st.error(f"An error occurred while fetching or calculating data: {e}")
+    st.error(f"Error loading market data: {e}")
