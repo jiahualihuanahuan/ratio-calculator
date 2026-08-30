@@ -5,7 +5,7 @@ import streamlit as st
 import yfinance as yf
 
 # ---------------------------------------------------------
-# App Configuration
+# 1. App Configuration & Setup
 # ---------------------------------------------------------
 st.set_page_config(
     page_title="Asset Ratio Tracker",
@@ -17,7 +17,7 @@ st.title("📈 Asset Price Ratio Explorer")
 st.markdown("Track, compare, and analyze the historical price ratio between any two assets.")
 
 # ---------------------------------------------------------
-# Preset Pairs Definition
+# 2. Presets & Session State
 # ---------------------------------------------------------
 PRESET_PAIRS = {
     "Gold / Silver": ("GC=F", "SI=F"),
@@ -28,27 +28,19 @@ PRESET_PAIRS = {
     "WTI Crude / Natural Gas": ("CL=F", "NG=F"),
 }
 
-# ---------------------------------------------------------
-# Session State Initialization
-# ---------------------------------------------------------
 if "ticker_a" not in st.session_state:
     st.session_state.ticker_a = "GC=F"
 if "ticker_b" not in st.session_state:
     st.session_state.ticker_b = "SI=F"
-
 
 def set_preset(pair_name):
     t_a, t_b = PRESET_PAIRS[pair_name]
     st.session_state.ticker_a = t_a
     st.session_state.ticker_b = t_b
 
-
-# ---------------------------------------------------------
-# Preset Buttons
-# ---------------------------------------------------------
+# Preset Buttons UI
 st.subheader("Popular Pairs")
 cols = st.columns(len(PRESET_PAIRS))
-
 for i, (label, _) in enumerate(PRESET_PAIRS.items()):
     with cols[i]:
         if st.button(label, use_container_width=True):
@@ -58,7 +50,7 @@ for i, (label, _) in enumerate(PRESET_PAIRS.items()):
 st.markdown("---")
 
 # ---------------------------------------------------------
-# Sidebar Controls
+# 3. Sidebar Configuration
 # ---------------------------------------------------------
 st.sidebar.header("Configuration")
 
@@ -74,82 +66,60 @@ ticker_b = st.sidebar.text_input(
     help="Yahoo Finance ticker symbol (e.g., SI=F, GLD, ETH-USD)",
 ).strip().upper()
 
-# Sync inputs back to session state
+# Keep session state synced with manual input
 st.session_state.ticker_a = ticker_a
 st.session_state.ticker_b = ticker_b
 
-# Date range selection
 use_max_history = st.sidebar.checkbox(
     "Use maximum available history",
     value=True,
-    help="Compare both assets across their shared historical overlap instead of a fixed date range.",
+    help="Compare both assets across their shared historical overlap.",
 )
 
 default_start = datetime.date.today() - datetime.timedelta(days=5 * 365)
-start_date = st.sidebar.date_input(
-    "Start Date",
-    value=default_start,
-    disabled=use_max_history,
-)
-end_date = st.sidebar.date_input(
-    "End Date",
-    value=datetime.date.today(),
-    disabled=use_max_history,
-)
+start_date = st.sidebar.date_input("Start Date", value=default_start, disabled=use_max_history)
+end_date = st.sidebar.date_input("End Date", value=datetime.date.today(), disabled=use_max_history)
 
-# Moving Average parameter
 sma_window = st.sidebar.slider("Moving Average Window (Days)", min_value=10, max_value=200, value=50, step=5)
 
-
 # ---------------------------------------------------------
-# Data Fetching & Normalization
+# 4. Data Fetching Logic
 # ---------------------------------------------------------
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_data(symbols, start, end, is_max):
-    # auto_adjust=True bakes dividends and splits into the 'Close' price
-    # to accurately reflect Total Return.
+    """
+    Fetches adjusted close prices for a list of symbols. 
+    Handles yfinance MultiIndex structures safely.
+    """
     if is_max:
-        df = yf.download(symbols, period="max", auto_adjust=True)
+        df = yf.download(symbols, period="max", auto_adjust=True, progress=False)
     else:
-        df = yf.download(symbols, start=start, end=end, auto_adjust=True)
+        # Make the end date inclusive
+        end_inclusive = end + datetime.timedelta(days=1)
+        df = yf.download(symbols, start=start, end=end_inclusive, auto_adjust=True, progress=False)
 
-    # yfinance returns MultiIndex columns for multiple tickers.
-    # We just want the 'Close' prices (which are now adjusted for dividends).
+    if df.empty:
+        return pd.DataFrame()
+
+    # Handle MultiIndex columns (standard when downloading multiple tickers)
     if isinstance(df.columns, pd.MultiIndex):
-        return df["Close"]
+        # Extract just the 'Close' grouping
+        if "Close" in df.columns.get_level_values(0):
+            df_close = df["Close"]
+        else:
+            df_close = df.xs("Close", axis=1, level=0)
     else:
-        # Fallback if only one ticker manages to download
-        return df[["Close"]]
+        # Fallback if only 1 ticker successfully downloads or API changes
+        df_close = df[["Close"]] if "Close" in df.columns else df
 
+    # Strip timezone data to prevent joining/alignment errors (critical for futures/crypto)
+    if isinstance(df_close.index, pd.DatetimeIndex) and df_close.index.tz is not None:
+        df_close.index = df_close.index.tz_localize(None)
 
-@st.cache_data(ttl=3600)
-def fetch_pair_data(t_a, t_b, start, end, use_max):
-    s_a = load_data(t_a, start, end, use_max)
-    s_b = load_data(t_b, start, end, use_max)
-
-    if isinstance(s_a.index, pd.DatetimeIndex) and s_a.index.tz is not None:
-        s_a.index = s_a.index.tz_localize(None)
-    if isinstance(s_b.index, pd.DatetimeIndex) and s_b.index.tz is not None:
-        s_b.index = s_b.index.tz_localize(None)
-
-    if isinstance(s_a, pd.Series):
-        s_a.name = t_a
-    else:
-        s_a = s_a.rename(columns={s_a.columns[0]: t_a})
-
-    if isinstance(s_b, pd.Series):
-        s_b.name = t_b
-    else:
-        s_b = s_b.rename(columns={s_b.columns[0]: t_b})
-
-    aligned = pd.concat([s_a, s_b], axis=1, join="inner").dropna()
-    if aligned.empty:
-        raise ValueError(f"'{t_a}' and '{t_b}' do not have overlapping historical trading days.")
-
-    return aligned
-
+    return df_close
 
 # ---------------------------------------------------------
-# Main Execution Flow
+# 5. Main Execution Flow
 # ---------------------------------------------------------
 if not ticker_a or not ticker_b:
     st.warning("Please enter valid ticker symbols for both assets.")
@@ -160,78 +130,85 @@ if ticker_a == ticker_b:
     st.stop()
 
 try:
-    with st.spinner(f"Fetching data for {ticker_a} and {ticker_b}..."):
-        data = fetch_pair_data(ticker_a, ticker_b, start_date, end_date, use_max_history)
+    with st.spinner(f"Fetching market data for {ticker_a} and {ticker_b}..."):
+        raw_data = load_data([ticker_a, ticker_b], start_date, end_date, use_max_history)
+
+    # Clean data: drop rows where BOTH are missing, then drop rows where ANY are missing
+    data = raw_data.dropna(axis=1, how="all").dropna()
+
+    # Validation
+    if data.empty or ticker_a not in data.columns or ticker_b not in data.columns:
+        st.error(
+            f"Insufficient or missing market data for **{ticker_a}** and **{ticker_b}**. "
+            "Please check that both symbols exist on Yahoo Finance and share overlapping trading dates."
+        )
+        st.stop()
 
     st.caption(
-        f"Displaying **{ticker_a} / {ticker_b}** across **{len(data)}** common trading days "
+        f"Displaying **{ticker_a} / {ticker_b}** across **{len(data):,}** common trading days "
         f"({data.index.min().strftime('%Y-%m-%d')} to {data.index.max().strftime('%Y-%m-%d')})."
     )
 
-    # Ratio Calculations
+    # Metrics Calculations
     ratio = data[ticker_a] / data[ticker_b]
     sma = ratio.rolling(window=sma_window).mean()
     mean_val = float(ratio.mean())
     std_val = float(ratio.std())
+    
     current_val = float(ratio.iloc[-1])
     prev_val = float(ratio.iloc[-2]) if len(ratio) > 1 else current_val
     delta_pct = ((current_val - prev_val) / prev_val) * 100
 
-    # Key Metric Cards
+    # ---------------------------------------------------------
+    # 6. UI: Metric Cards
+    # ---------------------------------------------------------
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Current Ratio", f"{current_val:.3f}", f"{delta_pct:+.2f}%")
     m2.metric("Historical Mean", f"{mean_val:.3f}")
     m3.metric(f"{sma_window}-Day SMA", f"{sma.iloc[-1]:.3f}" if pd.notna(sma.iloc[-1]) else "N/A")
     m4.metric("Standard Deviation (1σ)", f"{std_val:.3f}")
 
-    # Plotly Chart
+    # ---------------------------------------------------------
+    # 7. UI: Plotly Chart
+    # ---------------------------------------------------------
     fig = go.Figure()
 
+    # Main Ratio Line
     fig.add_trace(
         go.Scatter(
-            x=ratio.index,
-            y=ratio,
+            x=ratio.index, y=ratio,
             mode="lines",
             name=f"{ticker_a} / {ticker_b} Ratio",
             line=dict(color="#1f77b4", width=2),
         )
     )
 
+    # Moving Average
     fig.add_trace(
         go.Scatter(
-            x=sma.index,
-            y=sma,
+            x=sma.index, y=sma,
             mode="lines",
-            name=f"{sma_window}-Day Moving Avg",
+            name=f"{sma_window}-Day SMA",
             line=dict(color="#ff7f0e", width=1.5, dash="dash"),
         )
     )
 
-    # Reference Horizontal Lines
+    # Mean and Std Dev Lines
     fig.add_hline(
-        y=mean_val,
-        line_dash="dot",
-        line_color="#d62728",
-        annotation_text=f"Mean: {mean_val:.2f}",
-        annotation_position="bottom right",
+        y=mean_val, line_dash="dot", line_color="#d62728",
+        annotation_text=f"Mean: {mean_val:.2f}", annotation_position="bottom right",
     )
     fig.add_hline(
-        y=mean_val + std_val,
-        line_dash="dot",
-        line_color="#2ca02c",
-        annotation_text=f"+1σ: {(mean_val + std_val):.2f}",
-        annotation_position="top right",
+        y=mean_val + std_val, line_dash="dot", line_color="#2ca02c",
+        annotation_text=f"+1σ: {(mean_val + std_val):.2f}", annotation_position="top right",
     )
     fig.add_hline(
-        y=mean_val - std_val,
-        line_dash="dot",
-        line_color="#2ca02c",
-        annotation_text=f"-1σ: {(mean_val - std_val):.2f}",
-        annotation_position="bottom right",
+        y=mean_val - std_val, line_dash="dot", line_color="#2ca02c",
+        annotation_text=f"-1σ: {(mean_val - std_val):.2f}", annotation_position="bottom right",
     )
 
     fig.update_layout(
-        title=f"<b>Price Ratio:</b> {ticker_a} vs. {ticker_b}",
+        title=f"<b>Historical Ratio:</b> {ticker_a} vs. {ticker_b}",
         xaxis_title="Date",
         yaxis_title="Ratio",
         hovermode="x unified",
@@ -242,12 +219,16 @@ try:
 
     st.plotly_chart(fig, use_container_width=True)
 
-    # Data Inspection Table
+    # ---------------------------------------------------------
+    # 8. UI: Data Table Expander
+    # ---------------------------------------------------------
     with st.expander("View Raw Data Table"):
-        table_df = data.copy()
+        table_df = data[[ticker_a, ticker_b]].copy()
         table_df["Ratio"] = ratio
         table_df[f"SMA_{sma_window}"] = sma
+        
+        # Display the dataframe with the most recent dates at the top
         st.dataframe(table_df.sort_index(ascending=False), use_container_width=True)
 
 except Exception as e:
-    st.error(f"Error loading market data: {e}")
+    st.error(f"Error processing market data: {str(e)}")
