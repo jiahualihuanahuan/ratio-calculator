@@ -131,8 +131,15 @@ def fetch_pair_data(t_a, t_b, start, end, use_max):
     if isinstance(s_b.index, pd.DatetimeIndex) and s_b.index.tz is not None:
         s_b.index = s_b.index.tz_localize(None)
 
-    s_a = s_a.rename(t_a)
-    s_b = s_b.rename(t_b)
+    if isinstance(s_a, pd.Series):
+        s_a.name = t_a
+    else:
+        s_a = s_a.rename(columns={s_a.columns[0]: t_a})
+
+    if isinstance(s_b, pd.Series):
+        s_b.name = t_b
+    else:
+        s_b = s_b.rename(columns={s_b.columns[0]: t_b})
 
     aligned = pd.concat([s_a, s_b], axis=1, join="inner").dropna()
     if aligned.empty:
