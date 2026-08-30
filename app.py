@@ -104,37 +104,37 @@ sma_window = st.sidebar.slider("Moving Average Window (Days)", min_value=10, max
 # ---------------------------------------------------------
 # Data Fetching & Normalization
 # ---------------------------------------------------------
-def get_ticker_series(ticker_symbol: str, start=None, end=None, use_max=True) -> pd.Series:
-    ticker_obj = yf.Ticker(ticker_symbol)
-    
-    if use_max:
-        hist = ticker_obj.history(period="max", auto_adjust=False)
+def load_data(symbols, start, end, is_max):
+    # auto_adjust=True bakes dividends and splits into the 'Close' price
+    # to accurately reflect Total Return.
+    if is_max:
+        df = yf.download(symbols, period="max", auto_adjust=True, progress=False)
     else:
-        # End date in history is exclusive, so add 1 day
-        end_dt = end + datetime.timedelta(days=1)
-        hist = ticker_obj.history(start=start.strftime("%Y-%m-%d"), end=end_dt.strftime("%Y-%m-%d"), auto_adjust=False)
-        
-    if hist.empty or "Close" not in hist.columns:
-        raise ValueError(f"No price history found for symbol '{ticker_symbol}'.")
-    
-    series = hist["Close"].copy()
-    # Strip timezone to avoid tz-aware vs tz-naive alignment drops
-    if series.index.tz is not None:
-        series.index = series.index.tz_localize(None)
-    series.name = ticker_symbol
-    return series
+        df = yf.download(symbols, start=start, end=end, auto_adjust=True, progress=False)
+
+    # yfinance returns MultiIndex columns for multiple tickers.
+    # We just want the 'Close' prices (which are now adjusted for dividends).
+    if isinstance(df.columns, pd.MultiIndex):
+        return df["Close"]
+    else:
+        # Fallback if only one ticker manages to download
+        return df[["Close"]]
 
 
 @st.cache_data(ttl=3600)
 def fetch_pair_data(t_a, t_b, start, end, use_max):
-    s_a = get_ticker_series(t_a, start, end, use_max)
-    s_b = get_ticker_series(t_b, start, end, use_max)
-    
-    # Inner join on common dates
-    aligned = pd.concat([s_a, s_b], axis=1, join="inner").dropna()
+    data = load_data([t_a, t_b], start, end, use_max)
+
+    if isinstance(data.columns, pd.MultiIndex):
+        data = data.xs("Close", level=0, axis=1)
+
+    if t_a not in data.columns or t_b not in data.columns:
+        raise ValueError(f"'{t_a}' and '{t_b}' were not both returned in the fetched close-price data.")
+
+    aligned = data[[t_a, t_b]].dropna()
     if aligned.empty:
         raise ValueError(f"'{t_a}' and '{t_b}' do not have overlapping historical trading days.")
-        
+
     return aligned
 
 
