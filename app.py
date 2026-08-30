@@ -107,37 +107,18 @@ sma_window = st.sidebar.slider("Moving Average Window (Days)", min_value=10, max
 def load_data(symbols, start, end, is_max):
     # auto_adjust=True bakes dividends and splits into the 'Close' price
     # to accurately reflect Total Return.
-    for attempt in range(3):
-        try:
-            if is_max:
-                df = yf.download(symbols, period="max", auto_adjust=True, progress=False, threads=False)
-            else:
-                end_dt = end + datetime.timedelta(days=1)
-                df = yf.download(
-                    symbols,
-                    start=start.strftime("%Y-%m-%d"),
-                    end=end_dt.strftime("%Y-%m-%d"),
-                    auto_adjust=True,
-                    progress=False,
-                    threads=False,
-                )
+    if is_max:
+        df = yf.download(symbols, period="max", auto_adjust=True)
+    else:
+        df = yf.download(symbols, start=start, end=end, auto_adjust=True)
 
-            if df is None or df.empty:
-                continue
-
-            # yfinance returns MultiIndex columns for multiple tickers.
-            # We just want the 'Close' prices (which are now adjusted for dividends).
-            if isinstance(df.columns, pd.MultiIndex):
-                return df["Close"]
-            else:
-                # Fallback if only one ticker manages to download
-                if "Close" in df.columns:
-                    return df[["Close"]]
-                return df
-        except Exception:
-            continue
-
-    raise ValueError(f"No market data returned for {symbols} from Yahoo Finance.")
+    # yfinance returns MultiIndex columns for multiple tickers.
+    # We just want the 'Close' prices (which are now adjusted for dividends).
+    if isinstance(df.columns, pd.MultiIndex):
+        return df["Close"]
+    else:
+        # Fallback if only one ticker manages to download
+        return df[["Close"]]
 
 
 @st.cache_data(ttl=3600)
